@@ -356,3 +356,37 @@ void graph::test()
     printf("\nTest result:\n");
     printf("Vert_count, %d\nVert_max, %d\nEdge_count, %d\nLabel_count, %d\n", vert_count, vert_max, edge_count*2, label_count);
 }
+
+
+
+
+std::vector<int> graph::getNeighbors(int vertexId) {
+    std::vector<int> neighbors;
+
+    if (vertexId >= vert_count) {
+        std::cerr << "Vertex ID out of range" << std::endl;
+        return neighbors;
+    }
+
+    index_t start = beg_pos[vertexId];
+    index_t end = (vertexId < vert_count - 1) ? beg_pos[vertexId + 1] : edge_count;
+
+    for (index_t i = start; i < end; ++i) {
+        neighbors.push_back(csr[i]);
+    }
+
+    return neighbors;
+}
+
+bool graph::hasEdge(int u, int v) {
+    // 获取 u 的邻居
+    std::vector<int> neighborsU = getNeighbors(u);
+
+    // 检查 v 是否是 u 的邻居
+    if (std::find(neighborsU.begin(), neighborsU.end(), v) != neighborsU.end()) {
+        return true;
+    }
+
+    return false;
+}
+

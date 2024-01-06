@@ -78,6 +78,10 @@ class graph
 				std::cout << "\n";
 			}
 		}
+
+		std::vector<int> getNeighbors(int vertexId); // 获取邻居的方法
+		bool hasEdge(int u, int v);
+    	
 };
 
 #endif

@@ -214,6 +214,7 @@ class subgraph{
 		int num_thrds = 56;
 		int subregion_count;
 
+
 		// graph file names
 		const char* dataGraphFileName;
 		const char* queryGraphFileName;
@@ -277,6 +278,9 @@ class subgraph{
 		double* similarity;
 
 	public:
+		// 聚类系数阈值
+		double thresholdx = 1;
+
 		subgraph(const char* dataGraphFile, const char* queryGraphFile, int num_thrds, bool break_auto, int embedding_count = 1000);
 	//	~subgraph();
 	
@@ -285,6 +289,12 @@ class subgraph{
 		void execute();
 		void clean();
 		void clearCR();
+
+		//我的实现
+		void myGenericQueryProc();
+		void myGenerateQueryTree();
+		void myExploreGraph_sngl();
+
 
 		// turboIso query processing algorithm
 		void genericQueryProc();
@@ -338,6 +348,7 @@ class subgraph{
 		int maxEdgeRank(std::vector<float>&, std::vector<float>&);
 		void CreateSpanningTree();
 		bool allVerticesAdded(std::vector<int>&);
+		
 };
 
 #endif

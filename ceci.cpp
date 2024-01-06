@@ -41,8 +41,20 @@ int embedding_count = 0;
 char operationMode;
 double time1;
 
+
+/**
+ * 
+ * 
+ * 
+ * 
+ */
+
 // Function declarations
 void help();
+
+
+
+
 
 int main(int argc, char* argv[])
 {
@@ -62,14 +74,14 @@ int main(int argc, char* argv[])
 	// Read query and data file names
 	dataGraphFileName  	= argv[1];
 	queryGraphFileName 	= argv[2];
-	graph* datagraph = new graph(dataGraphFileName);
-	graph* querygraph = new graph(queryGraphFileName);
+	// graph* datagraph = new graph(dataGraphFileName);
+	// graph* querygraph = new graph(queryGraphFileName);
 
 	omp_thread_count = 32;
 	bool break_automorph = false;
 	if(worker_rank == 0) printf("Data graph: %s and Query Graph %s\n", dataGraphFileName, queryGraphFileName);
 	subgraph mySubgraphFinder(dataGraphFileName, queryGraphFileName, omp_thread_count, break_automorph);
-	mySubgraphFinder.genericQueryProc();
+	mySubgraphFinder.myGenericQueryProc();
 
 /*
 	// The form of operation; list all embedding or specific number of embeddings

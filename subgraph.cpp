@@ -37,11 +37,15 @@
 
 #include "subgraph.h"
 #include "wtime.h"
+#include "GraphUtils.h"
+#include "bloom.h"
 
 bool break_automorph;
 int automorphId[MAX_QUERY_NODE];
 
 using namespace std;
+
+
 
 subgraph::subgraph(const char* dataGraphFile, const char* queryGraphFile, int count_limit, bool break_auto, int embedding_count){
 	dataGraphFileName = dataGraphFile;
@@ -303,6 +307,190 @@ void subgraph::distributedQueryProc()
 }
 */
 
+
+/**
+ * 1.初始化和选择起始顶点：算法首先清理任何先前的状态，然后选择一个起始查询顶点。如果没有合适的起始顶点，算法返回。
+ * 2.生成查询树：将查询图转换成一个BFS（广度优先搜索）树。这有助于确定搜索顺序。
+ * 3.初始化候选区：为每个查询树中的节点创建一个候选区（CRI），用于存储潜在的匹配节点和边。每个候选区预留了足够的空间以避免频繁的内存重新分配。
+ * 4.寻找起始顶点的候选：根据起始顶点的标签在大图中找到所有可能的候选节点。这里使用了度过滤（Degree Filter）和邻域标签计数过滤（Neighborhood Label Count Filter）来优化候选节点的选择。
+ * 5.图的探索：一旦确定了起始顶点的候选节点，算法开始遍历大图，寻找与查询图匹配的子图。
+ * 6.匹配顺序和访问顺序：算法计算一个查询匹配序列来确定最优的搜索顺序，并打印出来供参考。
+ * 7.单线程搜索操作：设置一个单线程的控制块（TCB），并开始搜索操作。
+ * 8.并行搜索：这部分代码通过OpenMP并行化框架实现了多线程搜索。每个线程独立搜索并更新匹配结果。
+ * 9.结果输出：最后，算法打印出搜索所需的时间以及找到的嵌入（即匹配子图）的总数。
+ */
+
+// 1.查询树
+// 2.图的探索
+// 3.vm的选择
+//Bloom，并行
+
+void subgraph::myGenericQueryProc(){
+	clean();
+	double time;
+	// Find the node to get started with
+	startQueryVertex = chooseStartVertex();//implemented
+	std::cout << "The starting query Vertex is " << startQueryVertex << endl;
+	if(startQueryVertex == -1){
+		return;
+	}
+	
+	// rewrite the querygraph as a BFS Tree 
+	myGenerateQueryTree(); //implemented
+
+	// allocate the space for candidate region, reserve reasonable space in advance to avoid reallocation over and over again 
+	myCR = new CRI[queryTree.size()];
+	for(int qnode = 0; qnode < queryTree.size(); ++qnode){
+		myCR[qnode].node_cands.reserve(10000);
+		myCR[qnode].edge_cands.reserve(10000);
+		myCR[qnode].cardinality = new unsigned long long int[dataGraph->vert_count];
+		std::fill_n(myCR[qnode].cardinality, dataGraph->vert_count, 1);
+	}
+	
+	// Finding the candidates for start vertex
+	vector<int> startVertexCandidates;
+
+//////////////////////////////////////////////////////////////////////////////////
+	int n = 1000; // 预期插入的元素数量
+	double p = 0.01; // 期望的假阳性率
+	// 计算Bloom过滤器的大小
+	int m = static_cast<int>(-n * log(p) / pow(log(2), 2));
+	// 计算哈希函数的数量
+	int k = static_cast<int>(static_cast<double>(m) / n * log(2));
+	BloomFilter bloomFilter(m, k);
+//////////////////////////////////////////////////////////////////////////////////
+	// 大图的候选区
+	vm.clear();
+	// if the label is specific
+	if(queryGraph->csr_label[startQueryVertex] != -1){
+		startVertexCandidates = dataGraph->getLabelVertexList()->find(queryGraph->csr_label[startQueryVertex])->second;
+		// 填充Bloom过滤器（可能在更早的代码段中完成）
+		for (int candidate : startVertexCandidates) {
+			bloomFilter.add(candidate);
+		}
+
+		vector<int>::iterator startVertexCandidateIterator = startVertexCandidates.begin();
+		for(; startVertexCandidateIterator != startVertexCandidates.end(); ++startVertexCandidateIterator){
+
+			//使用Bloom过滤器进行初步检查
+			if (!bloomFilter.possiblyContains(*startVertexCandidateIterator)) {
+				continue;
+			}
+
+			// Degree filter
+			if(queryGraph->degree[queryTree[0].vertexId] > dataGraph->degree[*startVertexCandidateIterator]){
+				continue;
+			}
+	
+			// neighborhood label count filter
+			if(!NLCFilter(queryTree[0].vertexId, *startVertexCandidateIterator)){
+				continue;
+			}
+
+			
+
+			// Clustering coefficient filter
+			// if(!isCandidateWithClusteringCoefficient(*dataGraph, *queryGraph, *startVertexCandidateIterator, queryTree[0].vertexId, 10)){
+			// 	continue;
+			// }
+		
+			// passes all the filters, add to the list of nodes to be traversed
+			vm.push_back(*startVertexCandidateIterator);
+
+		}
+	}
+	else{
+		for(int it = 0; it != dataGraph->vert_count; ++it){
+
+			// 自己的过滤
+			// Degree filter
+			// if(false){
+			// 	continue;
+			// }
+
+			// Degree filter
+			if(queryGraph->degree[queryTree[0].vertexId] > dataGraph->degree[it]){
+				continue;
+			}
+			
+			// neighborhood label count filter
+			if(!NLCFilter(queryTree[0].vertexId, it)){
+				continue;
+			}
+			
+				
+			// passes all the filters, add to the list of nodes to be traversed
+			vm.push_back(it);	
+		}
+	}
+
+	// Explore the whole graph
+	myCR[0].node_cands.clear();
+	for(std::vector<int>::iterator cItr = vm.begin(); cItr != vm.end(); ++cItr){
+
+		if(numberOfEmbeddings_sngl >= sufficientNumberOfEmbeddings){
+			return;
+		}
+
+		//dont need no map, just use this vector
+		myCR[0].node_cands.push_back(*cItr);
+	}
+	time = wtime();
+	exploreGraph_sngl();
+	
+	//computeMatchingOrder();
+	for(int i = 0; i< queryTree.size(); ++i){
+		queryMatchingSequence[i] = queryTree[i].id;
+		queryMatchingSequence_inv[queryTree[i].id] = i;
+	}
+
+
+	// visit order check
+	printf("The query Matching Sequence is: ");
+	for(int i = 0; i < queryTree.size(); ++i){
+		printf(" %d", queryMatchingSequence[i]);
+	}
+	printf("\n");
+
+	subregion_count = myCR[queryMatchingSequence[0]].node_cands.size();
+
+
+	// single threaded search operation
+	myTCB_sngl.curr_query_node = 0;
+	myTCB_sngl.init(queryTree.size());
+	
+
+	time = wtime();
+#pragma omp parallel num_threads(num_thrds)
+	{
+		double xtime = omp_get_wtime();
+		//int myCardinality = 0;
+	//#pragma omp for schedule(dynamic) nowait
+		for(uint32_t cnode = 0; cnode < myCR[0].node_cands.size(); ++cnode)
+		{
+			int thid = omp_get_thread_num();
+			//std::vector<int> mywork = work_units[cnode];
+			//for(int i = 0; i < mywork.size(); ++i){
+				//printf("work %d is %d \n", i,mywork[i]);
+			myTCB[thid].embedding[queryMatchingSequence[0]] = myCR[0].node_cands[cnode];
+			myTCB[thid].curr_query_node++;
+			//}
+			subgraphSearch(thid);
+			
+			//for(int i = 0; i < mywork.size(); ++i){
+				myTCB[thid].curr_query_node--;
+			//}
+			if(totalEmbeddings() >= 100000){
+				break;
+			}
+		}
+	//	printf("%d %llu %f\n", omp_get_thread_num(), omp_get_wtime()-xtime);
+	}
+
+	printf("Final subgraph matching completed at %f Seconds\n", wtime()-time);	
+	printf("Total Number of Embeddings found is : %lu\n\n",totalEmbeddings());
+}
+
 // Single Machine query procesing engine
 void subgraph::genericQueryProc(){
 	clean();
@@ -343,6 +531,8 @@ void subgraph::genericQueryProc(){
 			if(!NLCFilter(queryTree[0].vertexId, *startVertexCandidateIterator)){
 				continue;
 			}
+
+			
 		
 			// passes all the filters, add to the list of nodes to be traversed
 			vm.push_back(*startVertexCandidateIterator);
@@ -360,6 +550,8 @@ void subgraph::genericQueryProc(){
 			if(!NLCFilter(queryTree[0].vertexId, it)){
 				continue;
 			}
+
+			
 				
 			// passes all the filters, add to the list of nodes to be traversed
 			vm.push_back(it);	
@@ -1169,6 +1361,66 @@ NEXT: return_value &= true;
 	return return_value;
 }
 
+void 
+subgraph::myGenerateQueryTree()
+{
+	//std::cout << "Number of Nodes" << queryGraph->vert_count << std::endl;
+	bool *flags = new bool[queryGraph->vert_count];
+	memset(flags, false, queryGraph->vert_count * sizeof(bool));
+	memset(visitTreeOrder, -1, queryGraph->vert_count * sizeof(uint8_t));
+
+	std::queue<std::pair<int, int> >S;
+	int vertexId, parentId;
+
+	S.push(std::make_pair(startQueryVertex, -1));
+	flags[startQueryVertex] = true;
+
+	while(!S.empty()){
+		vertexId = S.front().first;
+		parentId = S.front().second;
+		S.pop();
+
+		queryTree.push_back(queryNode());
+
+		queryNode &qNode 	= *(queryTree.rbegin());
+		qNode.vertexId  	= vertexId;
+		qNode.parent    	= parentId;
+		qNode.id		 	= queryTree.size()-1;
+		qNode.label 	  	= queryGraph->csr_label[vertexId];
+		qNode.childCount = 0;
+	
+		qGraphtoTreeMap[vertexId] = qNode.id;
+		
+		visitTreeOrder[vertexId] = qNode.id;
+
+		if(parentId != -1){
+			queryTree[parentId].childList[queryTree[parentId].childCount] = qNode.id;
+			queryTree[parentId].childCount++;
+		}
+		
+		// push 
+		std::vector<std::pair<int, int> > neighbors;
+		for(int vertItr = queryGraph->beg_pos[vertexId]; vertItr != queryGraph->beg_pos[vertexId+1]; ++vertItr){
+			neighbors.push_back(std::pair<int, int>(queryGraph->degree[queryGraph->csr[vertItr]], queryGraph->csr[vertItr]));
+		}
+		std::sort(neighbors.begin(), neighbors.end(), SortbyDegree());
+
+
+		for(int vertItr = 0; vertItr < neighbors.size(); ++vertItr){
+			int cNode = neighbors[vertItr].second;
+			if(!flags[cNode]){
+				flags[cNode] = true;
+				S.push(std::pair<int, int>(cNode, qNode.id));
+			}
+			else if(parentId != visitTreeOrder[cNode]){
+				qNode.ntEdges[qNode.ntEdgeCount] = cNode;
+				qNode.ntEdgeCount++;
+			}
+		}
+	}		
+	delete [] flags;
+}
+
 /*
  * Construct the BFS tree for query Graph
  */
@@ -1248,6 +1500,237 @@ subgraph::generateQueryTree()
 		}*/
 	}		
 	delete [] flags;
+}
+
+
+//  Graph Exploration routine
+void 
+subgraph::myExploreGraph_sngl()
+{
+	//memset(go_status, true , dataGraph->vert_count * sizeof(node_status_t));
+	for(int curr_queryNode = 1; curr_queryNode < queryTree.size(); ++curr_queryNode){
+		
+		//Query Node Specific Data
+		int parent = queryTree[curr_queryNode].parent;
+		memset(visit_status, UNVISITED , dataGraph->vert_count * sizeof(node_status_t));
+		memset(acceptance_status, REJECTED , dataGraph->vert_count * sizeof(node_status_t));
+
+		// std::cout << curr_queryNode << std::endl;
+
+		//memset(parent_count, 0 , dataGraph->vert_count * sizeof(uint8_t));
+		for(int mybeg = 0; mybeg < myCR[parent].node_cands.size(); ++mybeg){
+			int pNode = myCR[parent].node_cands[mybeg];
+			
+			if(pNode == -1){ continue;}
+			// do not continue if it has been removed from the candidate set earlier
+
+			vector<int> collector;
+			collector.reserve(50);
+
+			// GET the neighbors of candidates of parent vertex
+			adjLabelFrequency dataGraphChild = dataGraph->adjVertices[pNode];
+			std::vector<int> neighbors;
+			neighbors.clear();
+			std::map<int, std::vector<int>>::iterator it;
+			if(queryTree[curr_queryNode].label == -1){
+				for(it = dataGraphChild.labelCount.begin(); it != dataGraphChild.labelCount.end(); ++it){
+					neighbors.insert(neighbors.end(), it->second.begin(), it->second.end());
+				}	
+			}
+			else{
+				it = dataGraphChild.labelCount.find(queryTree[curr_queryNode].label);
+				neighbors.insert(neighbors.begin(), it->second.begin(), it->second.end());
+				// insert it->second to neighbors 
+			}
+
+			if(neighbors.empty()){continue;}
+//			if(childLabelList == dataGraphChild.labelCount.end()){ continue;}
+			
+			//for(vector<int>::iterator childLabelItem = childLabelList->second.begin(); childLabelItem != childLabelList->second.end(); ++childLabelItem){
+			for(vector<int>::iterator childLabelItem = neighbors.begin(); childLabelItem != neighbors.end(); ++childLabelItem){
+				// Check if the node has already been listed
+			//	if(break_automorph){
+			//		if(automorphId[queryTree[parent].vertexId] == automorphId[queryTree[curr_queryNode].vertexId]){
+			//			if(((queryTree[parent].vertexId < queryTree[curr_queryNode].vertexId) && (pNode > *childLabelItem))||((queryTree[parent].vertexId > queryTree[curr_queryNode].vertexId) && (pNode < *childLabelItem))){
+			//				continue;
+			//			}
+			//		}
+			//	}
+
+				if( visit_status[*childLabelItem] == VISITED){
+					if(acceptance_status[*childLabelItem] == REJECTED){
+						continue;
+					}else{
+						goto UPDATE;
+					}
+				}
+				
+				visit_status[*childLabelItem] = VISITED;
+				acceptance_status[*childLabelItem] = REJECTED;
+
+				if(queryGraph->degree[queryTree[curr_queryNode].vertexId] > dataGraph->degree[*childLabelItem]){
+					continue;
+				}
+
+
+				/* Neighborhood Label Count based early filtering */
+				if(!NLCFilter(queryTree[curr_queryNode].vertexId, *childLabelItem)){
+					continue;
+				}
+
+				//myCR[curr_queryNode].childrens[mybeg].push_back(*childLabelItem);
+				myCR[curr_queryNode].node_cands.push_back(*childLabelItem);
+				acceptance_status[*childLabelItem] = ACCEPTED;
+				//go_status[*childLabelItem] = true;
+
+UPDATE:			collector.push_back(*childLabelItem);
+				//if(collector.size() == 50){
+				//	break;
+				//}
+				//parent_count[*childLabelItem]++;
+		 	}
+
+			//If not empty, simply insert
+			if(!collector.empty()){
+				//insert(std::pair<int, vector<int> >(pNode, collector));
+				myCR[curr_queryNode].edge_cands.push_back(std::pair<int, vector<int> >(pNode, collector));
+				collector.clear();
+				continue;
+			}
+
+			
+			// If the collector vector is empty
+			// for all visited childs of pNode clear those entries from the candidate
+			queryNode myParent = queryTree[parent];
+
+			for(int childIndexLooper = 0; childIndexLooper < myParent.childCount; ++childIndexLooper){
+				if(myParent.childList[childIndexLooper] == curr_queryNode){
+					break;
+				}
+				
+				// search for the entry corresponding to pNode a.k.a. parent node in the edge list of already visited child nodes
+				// Nothing has been done to the parent node yet
+				edgeCandIterator map_itr = std::lower_bound(myCR[myParent.childList[childIndexLooper]].edge_cands.begin(), 
+											myCR[myParent.childList[childIndexLooper]].edge_cands.end(), pNode, DataCompare());
+
+				if(map_itr != myCR[myParent.childList[childIndexLooper]].edge_cands.end()){
+					// Clear the entry found
+					myCR[myParent.childList[childIndexLooper]].edge_cands.erase(map_itr);
+				}
+			}
+			//now do the dirty job related to pNode in parent itself
+			// 1. set cardinality to 0
+			// 2. change element to -1 so that it can be ignored in next sibilings
+			myCR[parent].cardinality[pNode] = 0;
+			myCR[parent].node_cands[mybeg] = -1;
+		}
+	}
+	// now sort the edge_cands list for all the nodes to allow the lower bound and binary search
+	for(int curr_queryNode = 0; curr_queryNode < queryTree.size(); ++curr_queryNode){
+		std::sort(myCR[curr_queryNode].edge_cands.begin(), myCR[curr_queryNode].edge_cands.end(), DataCompare());
+	}
+
+	// create the nte candidate index in ordered fashion
+	//float time1 = wtime();
+	for(int curr_queryNode = 0; curr_queryNode < queryTree.size(); ++curr_queryNode){
+		for(int cnode = 0; cnode < queryTree[curr_queryNode].ntEdgeCount; ++cnode){
+			//if non tree neighbor is already visited, create index for it
+			int target_id = qGraphtoTreeMap[queryTree[curr_queryNode].ntEdges[cnode]];
+			if(target_id > curr_queryNode){continue;}
+			std::vector<Data> xnte_cands;
+			xnte_cands.reserve(10000);
+			
+			memset(visit_status, UNVISITED , dataGraph->vert_count * sizeof(node_status_t));
+			memset(acceptance_status, REJECTED , dataGraph->vert_count * sizeof(node_status_t));
+
+			//memset(parent_count, 0 , dataGraph->vert_count * sizeof(uint8_t));
+			for(int mybeg = 0; mybeg < myCR[target_id].node_cands.size(); ++mybeg){
+				int pNode = myCR[target_id].node_cands[mybeg];
+				
+				if(pNode == -1){ continue;}
+				// do not continue if it has been removed from the candidate set earlier
+	
+				vector<int> collector;
+				collector.reserve(50);
+	
+				// GET the neighbors of candidates of parent vertex
+				adjLabelFrequency dataGraphChild = dataGraph->adjVertices[pNode];
+				map<int, vector<int> >::iterator childLabelList = dataGraphChild.labelCount.find(queryTree[curr_queryNode].label);
+	
+				if(childLabelList == dataGraphChild.labelCount.end()){ continue;}
+				
+				for(vector<int>::iterator childLabelItem = childLabelList->second.begin(); childLabelItem != childLabelList->second.end(); ++childLabelItem){
+			//		if(break_automorph){
+			//			if(automorphId[queryTree[target_id].vertexId] == automorphId[queryTree[curr_queryNode].vertexId]){
+			//				if(((queryTree[target_id].vertexId < queryTree[curr_queryNode].vertexId) && (pNode > *childLabelItem))||((queryTree[target_id].vertexId > queryTree[curr_queryNode].vertexId) && (pNode < *childLabelItem))){
+			//					continue;
+			//				}
+			//			}
+			//		}
+					// Check if the node has already been listed
+					if( visit_status[*childLabelItem] == VISITED){
+						if(acceptance_status[*childLabelItem] == REJECTED){continue;}
+						else{goto UPDATE1;}
+					}
+
+					visit_status[*childLabelItem] = VISITED;
+					acceptance_status[*childLabelItem] = REJECTED;
+
+					if(queryGraph->degree[queryTree[curr_queryNode].vertexId] > dataGraph->degree[*childLabelItem]){
+						continue;
+					}
+
+
+					// Neighborhood Label Count based early filtering 
+					if(!NLCFilter(queryTree[curr_queryNode].vertexId, *childLabelItem)){
+						continue;
+					}
+
+					acceptance_status[*childLabelItem] = ACCEPTED;
+
+	UPDATE1:		collector.push_back(*childLabelItem);
+
+				}
+
+				if(!collector.empty()){
+					xnte_cands.push_back(std::pair<int, vector<int> >(pNode, collector));
+					collector.clear();
+					continue;
+				}
+
+				// Since no childrens would have been visited yet, no need to 
+				// 1. set cardinality to 0
+				// 2. change element to -1 so that it can be ignored in next sibilings
+				myCR[target_id].cardinality[pNode] = 0;
+				myCR[target_id].node_cands[mybeg] = -1;
+			}
+			std::sort(xnte_cands.begin(), xnte_cands.end(), DataCompare());
+			myCR[curr_queryNode].nte_cands.insert(std::pair<int, std::vector<Data> >(target_id, xnte_cands));
+			xnte_cands.clear();
+		}
+	}
+	//printf("time for nte-index calculation is %f seconds\n", wtime()-time1);
+	//exit(0);
+	// code for bottom up refinement and cardinality computation
+	// Goals: decay the incomplete search tree to their roots
+	// Find cardinality associated with each candidate region, subregion and sub-subregion
+	// use the cardinality for obverall work estimation as well as to determine the visit order	
+	for(int curr_queryNode = queryTree.size()-1; curr_queryNode > 0; --curr_queryNode){
+		// get the parent node
+		int parent = queryTree[curr_queryNode].parent;
+		for(edgeCandIterator edgItr = myCR[curr_queryNode].edge_cands.begin(); edgItr != myCR[curr_queryNode].edge_cands.end(); ++edgItr){
+			int score = 0;
+			if(edgItr->second.empty()){continue;}
+			for(std::vector<int>::iterator sItr = edgItr->second.begin(); sItr != edgItr->second.end(); ++sItr){
+				//int id = edgItr->second[*sItr];
+				score += myCR[curr_queryNode].cardinality[*sItr];
+				if(myCR[curr_queryNode].cardinality[*sItr] == 0){
+					edgItr->second[*sItr] = -1;
+				}
+			}
+			myCR[parent].cardinality[edgItr->first] *= score;
+		}
+	}
 }
 
 //  Graph Exploration routine
