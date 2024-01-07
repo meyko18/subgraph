@@ -349,6 +349,7 @@ class subgraph{
 		void CreateSpanningTree();
 		bool allVerticesAdded(std::vector<int>&);
 		
+		
 };
 
 #endif
