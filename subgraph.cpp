@@ -327,7 +327,7 @@ void subgraph::distributedQueryProc()
 
 void subgraph::myGenericQueryProc(){
 	clean();
-	double time;
+	double time = 0;
 	// Find the node to get started with
 	startQueryVertex = chooseStartVertex();//implemented
 	std::cout << "The starting query Vertex is " << startQueryVertex << endl;
@@ -358,6 +358,13 @@ void subgraph::myGenericQueryProc(){
 	// 计算哈希函数的数量
 	int k = static_cast<int>(static_cast<double>(m) / n * log(2));
 	BloomFilter bloomFilter(m, k);
+
+	for (int i = 0; i < queryTree.size(); ++i){
+		bloomFilter.add(queryTree[i].vertexId);
+		// bloomFilter.add(queryGraph->degree[queryTree[i].vertexId]);
+	}		
+	//bloomFilter.add(queryTree[0].vertexId);
+
 //////////////////////////////////////////////////////////////////////////////////
 	// 大图的候选区
 	vm.clear();
@@ -365,27 +372,38 @@ void subgraph::myGenericQueryProc(){
 	if(queryGraph->csr_label[startQueryVertex] != -1){
 		startVertexCandidates = dataGraph->getLabelVertexList()->find(queryGraph->csr_label[startQueryVertex])->second;
 		// 填充Bloom过滤器（可能在更早的代码段中完成）
-		for (int candidate : startVertexCandidates) {
-			bloomFilter.add(candidate);
-		}
+		// 使用 std::sort 和 lambda 函数作为比较器来排序
+		// std::sort(startVertexCandidates.begin(), startVertexCandidates.end(),
+		// 	[this](const int &a, const int &b) -> bool {
+		// 		return this->dataGraph->getDegree(a) < this->dataGraph->getDegree(b);
+		// 	}
+		// );
+
 
 		vector<int>::iterator startVertexCandidateIterator = startVertexCandidates.begin();
 		for(; startVertexCandidateIterator != startVertexCandidates.end(); ++startVertexCandidateIterator){
 
 			//使用Bloom过滤器进行初步检查
-			if (!bloomFilter.possiblyContains(*startVertexCandidateIterator)) {
-				continue;
-			}
+			// if (!bloomFilter.possiblyContains(*startVertexCandidateIterator)) {
+			// 	continue;
+			// }
+			// bloomFilter.add(*startVertexCandidateIterator);
 
 			// Degree filter
 			if(queryGraph->degree[queryTree[0].vertexId] > dataGraph->degree[*startVertexCandidateIterator]){
 				continue;
 			}
-	
+			// if(!bloomFilter.possiblyContains(dataGraph->degree[*startVertexCandidateIterator])){
+			// 	continue;
+			// }
+
+
 			// neighborhood label count filter
 			if(!NLCFilter(queryTree[0].vertexId, *startVertexCandidateIterator)){
 				continue;
 			}
+
+
 
 			// Clustering coefficient filter
 			// if(!isCandidateWithClusteringCoefficient(*dataGraph, *queryGraph, *startVertexCandidateIterator, queryTree[0].vertexId, 10)){
@@ -405,7 +423,11 @@ void subgraph::myGenericQueryProc(){
 			// 	cout << "continue" << endl;
 			// 	continue;
 			// }
-
+			// if (!bloomFilter.possiblyContains(it)) {
+			// 	// cout << "continue" << endl;
+			// 	continue;
+			// }
+			cout << "it" << endl;
 			// Degree filter
 			if(queryGraph->degree[queryTree[0].vertexId] > dataGraph->degree[it]){
 				continue;
@@ -1588,6 +1610,7 @@ UPDATE:         collector.push_back(*childLabelItem);
         std::sort(myCR[curr_queryNode].edge_cands.begin(), myCR[curr_queryNode].edge_cands.end(), DataCompare());
     }
 
+	// #pragma omp parallel for
     for(int curr_queryNode = 0; curr_queryNode < queryTree.size(); ++curr_queryNode){
         for(int cnode = 0; cnode < queryTree[curr_queryNode].ntEdgeCount; ++cnode){
             int target_id = qGraphtoTreeMap[queryTree[curr_queryNode].ntEdges[cnode]];
@@ -1648,7 +1671,7 @@ UPDATE1:        collector.push_back(*childLabelItem);
             xnte_cands.clear();
         }
     }
-
+	// #pragma omp parallel for
     for(int curr_queryNode = queryTree.size()-1; curr_queryNode > 0; --curr_queryNode){
         int parent = queryTree[curr_queryNode].parent;
         for(edgeCandIterator edgItr = myCR[curr_queryNode].edge_cands.begin(); edgItr != myCR[curr_queryNode].edge_cands.end(); ++edgItr){
@@ -1730,6 +1753,8 @@ subgraph::exploreGraph_sngl()
 				
 				visit_status[*childLabelItem] = VISITED;
 				acceptance_status[*childLabelItem] = REJECTED;
+
+
 
 				if(queryGraph->degree[queryTree[curr_queryNode].vertexId] > dataGraph->degree[*childLabelItem]){
 					continue;

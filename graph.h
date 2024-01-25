@@ -78,6 +78,10 @@ class graph
 				std::cout << "\n";
 			}
 		}
+		int getDegree(int vertex) {
+        	// 这里返回节点的度
+        	return degree[vertex];
+    	}
 
 		std::vector<int> getNeighbors(int vertexId); // 获取邻居的方法
 		bool hasEdge(int u, int v);
